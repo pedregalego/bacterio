@@ -3,39 +3,41 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
-<title>Aranha de semas</title>
+<title>Aranha de semas VR</title>
 <style>
   :root { --bg:#07060a; --ink:#f4efe6; --dim:#9a93a6; --accent:#ffb02e; }
-  html,body { margin:0; height:100%; background:var(--bg); color:var(--ink); overflow:hidden;
+  html,body { margin:0; height:100%; background:#000; color:var(--ink); overflow:hidden;
     font-family:"Iowan Old Style","Palatino Linotype",Palatino,Georgia,serif; }
   canvas { position:fixed; inset:0; width:100%; height:100%; display:block; touch-action:none; }
-  #hud { position:fixed; left:14px; right:14px; top:calc(12px + env(safe-area-inset-top,0px)); pointer-events:none;
-    text-shadow:0 1px 4px #000, 0 0 10px #000; }
-  #path { font-size:clamp(20px,5vw,30px); font-style:italic; line-height:1.15; }
-  #top { margin-top:6px; font-size:14px; color:var(--dim); line-height:1.5; }
-  #count { position:fixed; right:14px; bottom:calc(14px + env(safe-area-inset-bottom,0px)); font-size:13px; color:var(--dim);
-    text-shadow:0 1px 4px #000; pointer-events:none; }
+  #c { display:none; }
   #start { position:fixed; inset:0; z-index:5; display:flex; flex-direction:column; align-items:center; justify-content:center;
-    gap:16px; background:var(--bg); text-align:center; padding:28px; }
-  #start h1 { margin:0; font-size:clamp(30px,8vw,52px); font-weight:400; font-style:italic; letter-spacing:-.01em; }
-  #start p { margin:0; max-width:36ch; color:var(--dim); font-size:16px; line-height:1.55; }
-  button { font:inherit; font-size:16px; color:#1a1206; background:var(--accent); border:0; border-radius:999px;
-    padding:13px 30px; cursor:pointer; }
-  button:focus-visible { outline:2px solid #fff; outline-offset:3px; }
-  #flip { position:fixed; left:14px; bottom:calc(14px + env(safe-area-inset-bottom,0px)); z-index:4; display:none;
-    font-size:13px; padding:8px 16px; background:rgba(7,6,10,.7); color:var(--ink); border:1px solid var(--dim); }
-  #err { color:#ff6b6b; font-size:14px; max-width:36ch; min-height:1em; }
+    gap:12px; background:var(--bg); text-align:center; padding:16px 28px; box-sizing:border-box; overflow:auto; }
+  #start h1 { margin:0; font-size:clamp(26px,6vw,44px); font-weight:400; font-style:italic; }
+  #start p { margin:0; max-width:46ch; color:var(--dim); font-size:15px; line-height:1.5; }
+  .opts { display:flex; gap:22px; align-items:center; flex-wrap:wrap; justify-content:center; font-size:14px; color:var(--ink); }
+  .opts label { display:flex; align-items:center; gap:8px; }
+  input[type=range] { width:130px; accent-color:var(--accent); }
+  input[type=checkbox] { width:18px; height:18px; accent-color:var(--accent); }
+  button { font:inherit; font-size:16px; color:#1a1206; background:var(--accent); border:0; border-radius:999px; padding:12px 30px; cursor:pointer; }
+  button:focus-visible, input:focus-visible { outline:2px solid #fff; outline-offset:3px; }
+  #err { color:#ff6b6b; font-size:14px; max-width:40ch; min-height:1em; }
+  #rotate { position:fixed; inset:0; z-index:9; background:var(--bg); display:none; align-items:center; justify-content:center;
+    text-align:center; padding:30px; font-size:20px; font-style:italic; }
+  @media (orientation:portrait) { #rotate.on { display:flex; } }
 </style>
 </head>
 <body>
 <canvas id="c"></canvas>
-<div id="hud"><div id="path">lendo o frame…</div><div id="top"></div></div>
-<div id="count"></div>
-<button id="flip">Trocar câmera</button>
+<canvas id="g"></canvas>
+<div id="rotate">Gire o celular para a horizontal e encaixe no óculos.</div>
 <div id="start">
-  <h1>Aranha de semas</h1>
-  <p>Aranhas escalam a imagem da câmera, se multiplicam onde há movimento e contorno, e transformam cada bloco em palavras. Toque na tela para soltar mais uma.</p>
-  <button id="go">Ativar câmera</button>
+  <h1>Aranha de semas · VR</h1>
+  <p>Visão estéreo lado a lado para óculos tipo Cardboard. As aranhas escalam o que a câmera vê, ficam em profundidades diferentes e escrevem cada bloco em palavras.</p>
+  <div class="opts">
+    <label><input type="checkbox" id="lens" checked> Corrigir lente</label>
+    <label>Profundidade <input type="range" id="ipd" min="0" max="40" value="16"></label>
+  </div>
+  <button id="go">Entrar em VR</button>
   <div id="err"></div>
 </div>
 <video id="v" playsinline muted autoplay style="display:none"></video>
@@ -43,65 +45,95 @@
 <script>
 (() => {
   const $ = id => document.getElementById(id);
-  const cv = $('c'), ctx = cv.getContext('2d'), video = $('v');
+  const cv = $('c'), ctx = cv.getContext('2d'), glc = $('g'), video = $('v');
   const small = document.createElement('canvas');
   const sctx = small.getContext('2d', { willReadFrequently: true });
-  const CELL = 60, PS = 6, MAX = 30, TAU = Math.PI * 2;
+  const CELL = 46, PS = 6, MAX = 28, TAU = Math.PI * 2;
+  const FONT = '"Iowan Old Style","Palatino Linotype",Palatino,Georgia,serif';
   const rnd = (a = 1, b) => b === undefined ? Math.random() * a : a + Math.random() * (b - a);
 
-  let W, H, dpr, cols, rows, cw, ch, cells = [], prevLum = null, facing = 'environment', stream = null;
+  let W, H, we, dpr, SZ = 1, cols, rows, cw, ch, cells = [], prevLum = null, stream = null, vig = null;
   let spiders = [], bursts = [], running = false, last = 0, lastAn = 0, lastHud = 0;
+  let IPD = 16, lens = true, hudPath = 'lendo o frame…', hudCount = '', GL = null;
 
-  // ---------- Vocabulário: cada faixa de medida vira um sema ----------
+  // ---------- Vocabulário ----------
   const band = (v, list) => { for (const [t, w] of list) if (v < t) return w; return list[list.length - 1][1]; };
   const LUZ = [[28,'breu'],[60,'sombra'],[100,'penumbra'],[150,'meio-tom'],[200,'claro'],[235,'luminoso'],[999,'brilho']];
   const COR = [[15,'rubro'],[40,'âmbar'],[65,'ouro'],[95,'lima'],[160,'verde'],[190,'turquesa'],[250,'azul'],[290,'violeta'],[335,'magenta'],[361,'rubro']];
   const TEX = [[4,'liso'],[8,'tênue'],[14,'grão'],[22,'rugoso'],[34,'aresta'],[999,'traço']];
   const MOV = [[7,''],[14,'vibra'],[28,'tremor'],[999,'fluxo']];
-
-  function parts(s) {
-    return { luz: band(s.bri, LUZ),
-             cor: s.sat > .2 ? band(s.hue, COR) : (s.bri > 40 && s.bri < 215 ? 'cinza' : ''),
-             tex: band(s.edge, TEX), mov: band(s.motion, MOV) };
-  }
+  const parts = s => ({ luz: band(s.bri, LUZ),
+    cor: s.sat > .2 ? band(s.hue, COR) : (s.bri > 40 && s.bri < 215 ? 'cinza' : ''), tex: band(s.edge, TEX), mov: band(s.motion, MOV) });
   function wordOf(p, s) {
     let w = p.mov || (s.edge > 22 ? p.tex : (s.bri < 60 || s.bri > 200 ? p.luz : (p.cor || p.tex)));
     if (s.interest > 1) { const sec = p.cor || p.luz; if (sec && !w.includes(sec)) w += ' ' + sec; }
     return w;
   }
-  function glow(s) {
-    const k = 255 / Math.max(s.r, s.g, s.b, 1), f = v => Math.min(255, v * k * .75 + 64) | 0;
-    return `rgb(${f(s.r)},${f(s.g)},${f(s.b)})`;
+  const glow = s => { const k = 255 / Math.max(s.r, s.g, s.b, 1), f = v => Math.min(255, v * k * .75 + 64) | 0; return `rgb(${f(s.r)},${f(s.g)},${f(s.b)})`; };
+
+  // ---------- Pós-processo WebGL: lente (barril) para cada olho ----------
+  const VS = 'attribute vec2 a;varying vec2 uv;void main(){uv=a*.5+.5;gl_Position=vec4(a,0.,1.);}';
+  const FS = `precision mediump float;uniform sampler2D t;uniform float k,S,asp;varying vec2 uv;
+    void main(){float e=step(.5,uv.x);vec2 l=vec2((uv.x-e*.5)*2.,uv.y)*2.-1.;vec2 p=l*vec2(asp,1.);
+    float r2=dot(p,p)/(asp*asp+1.);vec2 s=l*(1.+k*r2)*S;
+    if(abs(s.x)>1.||abs(s.y)>1.){gl_FragColor=vec4(0.,0.,0.,1.);return;}
+    gl_FragColor=texture2D(t,vec2((s.x*.5+.5)*.5+e*.5,s.y*.5+.5));}`;
+  function initGL() {
+    const g = glc.getContext('webgl', { antialias: false, alpha: false }); if (!g) return false;
+    const mk = (t, src) => { const s = g.createShader(t); g.shaderSource(s, src); g.compileShader(s); return s; };
+    const p = g.createProgram(); g.attachShader(p, mk(g.VERTEX_SHADER, VS)); g.attachShader(p, mk(g.FRAGMENT_SHADER, FS)); g.linkProgram(p);
+    if (!g.getProgramParameter(p, g.LINK_STATUS)) return false;
+    g.useProgram(p); g.bindBuffer(g.ARRAY_BUFFER, g.createBuffer());
+    g.bufferData(g.ARRAY_BUFFER, new Float32Array([-1,-1, 1,-1, -1,1, 1,1]), g.STATIC_DRAW);
+    const loc = g.getAttribLocation(p, 'a'); g.enableVertexAttribArray(loc); g.vertexAttribPointer(loc, 2, g.FLOAT, false, 0, 0);
+    g.bindTexture(g.TEXTURE_2D, g.createTexture());
+    [[g.TEXTURE_MIN_FILTER, g.LINEAR], [g.TEXTURE_MAG_FILTER, g.LINEAR], [g.TEXTURE_WRAP_S, g.CLAMP_TO_EDGE], [g.TEXTURE_WRAP_T, g.CLAMP_TO_EDGE]]
+      .forEach(([a, b]) => g.texParameteri(g.TEXTURE_2D, a, b));
+    g.pixelStorei(g.UNPACK_FLIP_Y_WEBGL, true);
+    GL = { g, k: g.getUniformLocation(p, 'k'), s: g.getUniformLocation(p, 'S'), a: g.getUniformLocation(p, 'asp') };
+    return true;
+  }
+  function present() {
+    const g = GL.g; g.viewport(0, 0, glc.width, glc.height);
+    g.texImage2D(g.TEXTURE_2D, 0, g.RGBA, g.RGBA, g.UNSIGNED_BYTE, cv);
+    g.uniform1f(GL.k, lens ? .28 : 0); g.uniform1f(GL.s, lens ? .92 : 1); g.uniform1f(GL.a, (glc.width / 2) / glc.height);
+    g.drawArrays(g.TRIANGLE_STRIP, 0, 4);
   }
 
-  // ---------- Layout e câmera ----------
+  // ---------- Layout / entrada em VR ----------
   function layout() {
-    dpr = Math.min(devicePixelRatio || 1, 2); W = innerWidth; H = innerHeight;
-    cv.width = W * dpr; cv.height = H * dpr; ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    cols = Math.max(4, Math.round(W / CELL)); rows = Math.max(4, Math.round(H / CELL));
-    cw = W / cols; ch = H / rows; small.width = cols * PS; small.height = rows * PS;
-    cells = Array.from({ length: cols * rows }, () => ({ word: null, parts: null, col: '#fff', t: -1e9, live: null,
+    dpr = Math.min(devicePixelRatio || 1, 1.5); W = innerWidth; H = innerHeight; we = Math.floor(W / 2);
+    SZ = Math.max(.7, Math.min(1.25, H / 430));
+    cv.width = glc.width = Math.round(W * dpr); cv.height = glc.height = Math.round(H * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    cols = Math.max(4, Math.round(we / CELL)); rows = Math.max(4, Math.round(H / CELL));
+    cw = we / cols; ch = H / rows; small.width = cols * PS; small.height = rows * PS;
+    cells = Array.from({ length: cols * rows }, () => ({ word: null, parts: null, col: '#fff', near: .2, t: -1e9, live: null,
       jx: rnd(-.2, .2) * cw, jy: rnd(-.2, .2) * ch, rot: rnd(-.14, .14) }));
+    vig = ctx.createRadialGradient(we / 2, H / 2, H * .32, we / 2, H / 2, Math.hypot(we, H) / 2);
+    vig.addColorStop(0, 'rgba(0,0,0,0)'); vig.addColorStop(1, 'rgba(0,0,0,.9)');
     prevLum = null; spiders = []; bursts = [];
     for (let i = 0; i < 4; i++) spawnEdge();
   }
-  async function startCam() {
-    if (stream) stream.getTracks().forEach(t => t.stop());
+  async function enter() {
+    lens = $('lens').checked; IPD = +$('ipd').value;
+    try { document.documentElement.requestFullscreen && document.documentElement.requestFullscreen().then(() =>
+      screen.orientation && screen.orientation.lock && screen.orientation.lock('landscape').catch(() => {})).catch(() => {}); } catch (e) {}
     try {
-      stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: facing }, width: { ideal: 1280 } }, audio: false });
+      stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 } }, audio: false });
       video.srcObject = stream; await video.play();
-      $('start').style.display = 'none'; $('flip').style.display = 'block';
-      layout(); if (!running) { running = true; requestAnimationFrame(loop); }
-    } catch (e) {
-      $('err').textContent = 'Não foi possível abrir a câmera: ' + e.message + '. Use HTTPS ou localhost e permita o acesso.';
-    }
+    } catch (e) { $('err').textContent = 'Não foi possível abrir a câmera: ' + e.message + '. Use HTTPS ou localhost e permita o acesso.'; return; }
+    try { navigator.wakeLock && navigator.wakeLock.request('screen').catch(() => {}); } catch (e) {}
+    $('start').style.display = 'none'; $('rotate').classList.add('on');
+    if (initGL()) cv.style.display = 'none'; else { glc.style.display = 'none'; cv.style.display = 'block'; GL = null; }
+    layout(); if (!running) { running = true; requestAnimationFrame(loop); }
   }
-  $('go').onclick = startCam;
-  $('flip').onclick = () => { facing = facing === 'environment' ? 'user' : 'environment'; startCam(); };
-  addEventListener('resize', () => { if (stream) layout(); });
-  cv.addEventListener('pointerdown', e => {
-    const s = spawn(e.clientX, e.clientY, rnd(TAU), 10, 1);
-    if (s) bursts.push({ x: e.clientX, y: e.clientY, t: performance.now(), hue: s.hue });
+  $('go').onclick = enter;
+  addEventListener('resize', () => { if (running) setTimeout(layout, 150); });
+  document.addEventListener('pointerdown', e => {
+    if (!running) return;
+    const x = e.clientX % we, y = e.clientY, s = spawn(x, y, rnd(TAU), 10, 1);
+    if (s) bursts.push({ x, y, t: performance.now(), hue: s.hue });
   });
 
   function cover(t, tw, th) {
@@ -125,12 +157,10 @@
         if (prevLum) motion += Math.abs(lum[i] - prevLum[i]);
       }
       const n = PS * PS; r /= n; g /= n; b /= n; edge /= n * 2; motion /= n;
-      const mx = Math.max(r, g, b), mn = Math.min(r, g, b), dl = mx - mn;
-      let hue = 0;
+      const mx = Math.max(r, g, b), mn = Math.min(r, g, b), dl = mx - mn; let hue = 0;
       if (dl) { hue = mx === r ? ((g - b) / dl) % 6 : mx === g ? (b - r) / dl + 2 : (r - g) / dl + 4; hue = (hue * 60 + 360) % 360; }
       const c = cells[cy * cols + cx], mo = c.live ? c.live.motion * .6 + motion * .4 : motion;
-      c.live = { r, g, b, hue, sat: mx ? dl / mx : 0, bri: .299 * r + .587 * g + .114 * b, edge, motion: mo,
-                 interest: Math.min(3, edge / 26 + mo / 12) };
+      c.live = { r, g, b, hue, sat: mx ? dl / mx : 0, bri: .299 * r + .587 * g + .114 * b, edge, motion: mo, interest: Math.min(3, edge / 26 + mo / 12) };
     }
     prevLum = lum;
   }
@@ -138,60 +168,51 @@
   // ---------- Aranhas ----------
   function spawn(x, y, ang, energy, sc, hue) {
     if (spiders.length >= MAX + 6) return null;
-    const s = { x, y, vx: 0, vy: 0, ang, tang: ang, speed: rnd(210, 350), mode: 'climb', until: 0, nextSteer: 0,
-      energy, sc, hue: hue === undefined ? rnd(360) : (hue + 360) % 360, trail: [], alpha: 1, dying: false, legs: [] };
+    const s = { x, y, vx: 0, vy: 0, ang, tang: ang, speed: rnd(190, 320) * SZ, mode: 'climb', until: 0, nextSteer: 0, energy,
+      base: sc * SZ, sc: sc * SZ, z: .5, zt: .5, hue: hue === undefined ? rnd(360) : (hue + 360) % 360, trail: [], alpha: 1, dying: false, legs: [] };
     const A = [.8, 1.3, 1.8, 2.4];
-    for (let i = 0; i < 8; i++) {
-      const side = i < 4 ? 1 : -1;
-      s.legs.push({ a: A[i % 4], side, fx: x, fy: y, fromx: x, fromy: y, tx: x, ty: y, t: 1, grp: ((i % 4) + (side > 0 ? 0 : 1)) % 2 });
-    }
+    for (let i = 0; i < 8; i++) { const side = i < 4 ? 1 : -1;
+      s.legs.push({ a: A[i % 4], side, fx: x, fy: y, fromx: x, fromy: y, tx: x, ty: y, t: 1, grp: ((i % 4) + (side > 0 ? 0 : 1)) % 2 }); }
     spiders.push(s); return s;
   }
   function spawnEdge() {
     const side = Math.floor(rnd(4)), p = rnd(.15, .85);
-    const x = side === 0 ? 0 : side === 1 ? W : p * W, y = side === 2 ? 0 : side === 3 ? H : p * H;
-    spawn(x, y, Math.atan2(H / 2 - y, W / 2 - x) + rnd(-.6, .6), 9, 1);
+    const x = side === 0 ? 0 : side === 1 ? we : p * we, y = side === 2 ? 0 : side === 3 ? H : p * H;
+    spawn(x, y, Math.atan2(H / 2 - y, we / 2 - x) + rnd(-.6, .6), 9, 1);
   }
   function split(s, now) {
-    const n = spawn(s.x, s.y, s.ang - 1.3, s.energy * .5, .6, s.hue + rnd(-35, 35));
-    if (!n) return;
-    s.energy *= .5; s.tang = s.ang + 1.3; n.speed = s.speed * rnd(.85, 1.25);
-    bursts.push({ x: s.x, y: s.y, t: now, hue: s.hue });
+    const n = spawn(s.x, s.y, s.ang - 1.3, s.energy * .5, .6, s.hue + rnd(-35, 35)); if (!n) return;
+    s.energy *= .5; s.tang = s.ang + 1.3; n.speed = s.speed * rnd(.85, 1.25); bursts.push({ x: s.x, y: s.y, t: now, hue: s.hue });
   }
-
-  function think(s, now) {                          // troca de comportamento imprevisível
+  function think(s, now) {
     const r = Math.random(); let dur;
-    if (r < .5) { s.mode = 'climb'; dur = rnd(.5, 1.6); }
-    else if (r < .72) { s.mode = 'wander'; dur = rnd(.4, 1.1); }
+    if (r < .5) { s.mode = 'climb'; dur = rnd(.5, 1.6); s.zt = rnd(.25, .7); }
+    else if (r < .72) { s.mode = 'wander'; dur = rnd(.4, 1.1); s.zt = rnd(.2, .9); }
     else if (r < .88) {
-      s.mode = 'dash'; dur = rnd(.15, .4);
+      s.mode = 'dash'; dur = rnd(.15, .4); s.zt = 1;               // avança em direção ao espectador
       let best = null, bs = -1;
-      for (let k = 0; k < 8; k++) { const c = Math.floor(rnd(cells.length)), v = cells[c].live ? cells[c].live.interest + rnd(.8) : 0;
-        if (v > bs) { bs = v; best = c; } }
-      s.tang = Math.atan2(((Math.floor(best / cols) + .5) * ch) - s.y, ((best % cols + .5) * cw) - s.x);
-    } else { s.mode = 'freeze'; dur = rnd(.12, .45); }
+      for (let k = 0; k < 8; k++) { const c = Math.floor(rnd(cells.length)), v = cells[c].live ? cells[c].live.interest + rnd(.8) : 0; if (v > bs) { bs = v; best = c; } }
+      s.tang = Math.atan2((Math.floor(best / cols) + .5) * ch - s.y, (best % cols + .5) * cw - s.x);
+    } else { s.mode = 'freeze'; dur = rnd(.12, .45); s.zt = rnd(0, .3); }
     s.until = now + dur * 1000;
   }
   function steer(s, now) {
     s.nextSteer = now + rnd(90, 260);
-    if (s.mode === 'climb') {                       // sobe pelos contornos: vai para o vizinho de maior interesse
+    if (s.mode === 'climb') {
       const cx = Math.floor(s.x / cw), cy = Math.floor(s.y / ch); let best = s.tang, bs = -1e9;
       for (let k = 0; k < 8; k++) {
         const a = k * TAU / 8 + rnd(-.2, .2), nx = cx + Math.round(Math.cos(a)), ny = cy + Math.round(Math.sin(a));
         if (nx < 0 || ny < 0 || nx >= cols || ny >= rows) continue;
         const c = cells[ny * cols + nx]; if (!c.live) continue;
-        const age = Math.min(3, (performance.now() - c.t) / 2500);
-        let sc = c.live.interest * 1.2 + age + rnd(.9);
+        let sc = c.live.interest * 1.2 + Math.min(3, (now - c.t) / 2500) + rnd(.9);
         if (Math.cos(a - s.ang) < -.5) sc -= .8;
         if (sc > bs) { bs = sc; best = a; }
       }
       s.tang = best;
     } else if (s.mode === 'wander') s.tang += rnd(-1.3, 1.3);
-    const m = 36;
-    if (s.x < m || s.x > W - m || s.y < m || s.y > H - m)
-      s.tang = Math.atan2(H / 2 - s.y + rnd(-H / 4, H / 4), W / 2 - s.x + rnd(-W / 4, W / 4));
+    const m = 30 * SZ;
+    if (s.x < m || s.x > we - m || s.y < m || s.y > H - m) s.tang = Math.atan2(H / 2 - s.y + rnd(-H / 4, H / 4), we / 2 - s.x + rnd(-we / 4, we / 4));
   }
-
   function updateSpider(s, dt, now) {
     if (s.dying) { s.alpha -= dt * 2.5; return; }
     if (now > s.until) think(s, now);
@@ -199,124 +220,118 @@
     const sp = s.mode === 'dash' ? s.speed * 2.6 : s.mode === 'freeze' ? 0 : s.mode === 'wander' ? s.speed * .7 : s.speed;
     const da = ((s.tang - s.ang + Math.PI) % TAU + TAU) % TAU - Math.PI;
     s.ang += da * Math.min(1, dt * (s.mode === 'dash' ? 16 : 9));
-    s.vx += (Math.cos(s.ang) * sp - s.vx) * Math.min(1, dt * 7);
-    s.vy += (Math.sin(s.ang) * sp - s.vy) * Math.min(1, dt * 7);
-    s.x = Math.max(0, Math.min(W, s.x + s.vx * dt)); s.y = Math.max(0, Math.min(H, s.y + s.vy * dt));
-    if (s.sc < 1) s.sc = Math.min(1, s.sc + dt * .5);
-    s.energy -= dt * .9;
-    if (s.energy <= 0) s.dying = true;
-
+    s.vx += (Math.cos(s.ang) * sp - s.vx) * Math.min(1, dt * 7); s.vy += (Math.sin(s.ang) * sp - s.vy) * Math.min(1, dt * 7);
+    s.x = Math.max(0, Math.min(we, s.x + s.vx * dt)); s.y = Math.max(0, Math.min(H, s.y + s.vy * dt));
+    s.z += (s.zt - s.z) * Math.min(1, dt * 3);
+    if (s.base < SZ) s.base = Math.min(SZ, s.base + dt * .5 * SZ);
+    s.sc = s.base * (.75 + .6 * s.z);
+    s.energy -= dt * .9; if (s.energy <= 0) s.dying = true;
     const tl = s.trail, lp = tl[tl.length - 1];
     if (!lp || Math.hypot(s.x - lp[0], s.y - lp[1]) > 7) { tl.push([s.x, s.y]); if (tl.length > 26) tl.shift(); }
 
-    // pernas: passo alternado em dois grupos
     const R = 34 * s.sc, c = Math.cos(s.ang), si = Math.sin(s.ang);
     for (const L of s.legs) {
       const bx = Math.cos(L.a) * R, by = L.side * Math.sin(L.a) * R;
       const rx = s.x + c * bx - si * by + s.vx * .14, ry = s.y + si * bx + c * by + s.vy * .14;
-      if (L.t < 1) {
-        L.t = Math.min(1, L.t + dt / .07);
-        L.fx = L.fromx + (L.tx - L.fromx) * L.t; L.fy = L.fromy + (L.ty - L.fromy) * L.t;
-      } else if ((Math.hypot(rx - L.fx, ry - L.fy) > R * .5 || (s.mode === 'freeze' && Math.random() < .04)) &&
-                 !s.legs.some(o => o.grp !== L.grp && o.t < 1)) {
+      if (L.t < 1) { L.t = Math.min(1, L.t + dt / .07); L.fx = L.fromx + (L.tx - L.fromx) * L.t; L.fy = L.fromy + (L.ty - L.fromy) * L.t; }
+      else if ((Math.hypot(rx - L.fx, ry - L.fy) > R * .5 || (s.mode === 'freeze' && Math.random() < .04)) && !s.legs.some(o => o.grp !== L.grp && o.t < 1)) {
         const j = s.mode === 'freeze' ? 9 : 0;
         L.t = 0; L.fromx = L.fx; L.fromy = L.fy; L.tx = rx + rnd(-j, j); L.ty = ry + rnd(-j, j);
       }
     }
-
-    // lê o bloco sob a aranha e escreve a palavra nele
-    const ci = Math.min(rows - 1, Math.max(0, Math.floor(s.y / ch))) * cols + Math.min(cols - 1, Math.max(0, Math.floor(s.x / cw)));
-    const cell = cells[ci];
+    const ci = Math.min(rows - 1, Math.max(0, Math.floor(s.y / ch))) * cols + Math.min(cols - 1, Math.max(0, Math.floor(s.x / cw))), cell = cells[ci];
     if (cell.live && now - cell.t > 900) {
       const stale = now - cell.t > 2500;
       cell.parts = parts(cell.live); cell.word = wordOf(cell.parts, cell.live); cell.col = glow(cell.live); cell.t = now;
+      cell.near = .1 + .35 * Math.min(1, cell.live.interest / 2);
       s.energy = Math.min(14, s.energy + (stale ? 1.6 : .15));
       if (cell.live.interest > 1.1 && s.energy > 10 && spiders.length < MAX && Math.random() < .45) split(s, now);
     }
   }
 
-  // ---------- Desenho ----------
-  function drawWords(now) {
-    ctx.fillStyle = 'rgba(4,3,8,.4)'; ctx.fillRect(0, 0, W, H);
+  // ---------- Desenho (por olho) ----------
+  function drawWords(now, e) {
+    ctx.fillStyle = 'rgba(4,3,8,.4)'; ctx.fillRect(0, 0, we, H);
     ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
     for (let i = 0; i < cells.length; i++) {
       const c = cells[i]; if (!c.word) continue;
-      const age = now - c.t, pop = Math.max(0, 1 - age / 650);
-      ctx.save(); ctx.translate((i % cols + .5) * cw + c.jx, (Math.floor(i / cols) + .5) * ch + c.jy); ctx.rotate(c.rot);
+      const age = now - c.t, pop = Math.max(0, 1 - age / 650), ox = -e * (c.near + pop * .15) * IPD;
+      ctx.save(); ctx.translate((i % cols + .5) * cw + c.jx + ox, (Math.floor(i / cols) + .5) * ch + c.jy); ctx.rotate(c.rot);
       ctx.globalAlpha = Math.max(.32, 1 - age / 14000);
-      ctx.font = `italic ${Math.round(cw * .27 + pop * 10)}px "Iowan Old Style","Palatino Linotype",Palatino,Georgia,serif`;
+      ctx.font = `italic ${Math.round(cw * .34 + pop * 10)}px ${FONT}`;
       ctx.fillStyle = c.col; if (pop > 0) { ctx.shadowColor = c.col; ctx.shadowBlur = 14 * pop; }
       ctx.fillText(c.word, 0, 0); ctx.restore();
     }
   }
-  function drawSpider(s) {
+  function drawSpider(s, e) {
     const col = `hsl(${s.hue},95%,62%)`, k = s.sc, c = Math.cos(s.ang), si = Math.sin(s.ang);
-    ctx.save(); ctx.globalAlpha = Math.max(0, s.alpha);
-    if (s.trail.length > 1) {                       // fio de seda
+    ctx.save(); ctx.translate(-e * (.35 + .65 * s.z) * IPD, 0); ctx.globalAlpha = Math.max(0, s.alpha);
+    if (s.trail.length > 1) {
       ctx.strokeStyle = col; ctx.globalAlpha *= .4; ctx.lineWidth = 1; ctx.beginPath();
       s.trail.forEach((p, i) => i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1])); ctx.lineTo(s.x, s.y); ctx.stroke();
       ctx.globalAlpha = Math.max(0, s.alpha);
     }
     ctx.strokeStyle = col; ctx.lineWidth = 1.7 * k + .3; ctx.lineJoin = 'round'; ctx.lineCap = 'round';
     const l = 34 * k * .85;
-    for (const L of s.legs) {                       // perna com cinemática inversa de 2 segmentos
-      const hx = s.x + c * Math.cos(L.a) * 4 * k - si * L.side * Math.sin(L.a) * 4 * k;
-      const hy = s.y + si * Math.cos(L.a) * 4 * k + c * L.side * Math.sin(L.a) * 4 * k;
-      let dx = L.fx - hx, dy = L.fy - hy; const d = Math.hypot(dx, dy) || 1, dd = Math.min(d, 2 * l - .01), u = dd / d;
+    for (const L of s.legs) {
+      const hx = s.x + c * Math.cos(L.a) * 4 * k - si * L.side * Math.sin(L.a) * 4 * k, hy = s.y + si * Math.cos(L.a) * 4 * k + c * L.side * Math.sin(L.a) * 4 * k;
+      const dx = L.fx - hx, dy = L.fy - hy, d = Math.hypot(dx, dy) || 1, dd = Math.min(d, 2 * l - .01), u = dd / d;
       const fx = hx + dx * u, fy = hy + dy * u, h = Math.sqrt(Math.max(0, l * l - dd * dd / 4));
       let px = -dy / d, py = dx / d; if (px * -si * L.side + py * c * L.side < 0) { px = -px; py = -py; }
       ctx.beginPath(); ctx.moveTo(hx, hy); ctx.lineTo((hx + fx) / 2 + px * h, (hy + fy) / 2 + py * h); ctx.lineTo(fx, fy); ctx.stroke();
     }
-    ctx.translate(s.x, s.y); ctx.rotate(s.ang);
-    ctx.fillStyle = 'rgba(8,6,12,.9)'; ctx.lineWidth = 1.4;
-    ctx.beginPath(); ctx.ellipse(-9 * k, 0, 9 * k, 7 * k, 0, 0, TAU); ctx.fill(); ctx.stroke();   // abdômen
-    ctx.beginPath(); ctx.arc(5 * k, 0, 5.2 * k, 0, TAU); ctx.fill(); ctx.stroke();                 // cabeça
-    ctx.fillStyle = col; ctx.beginPath(); ctx.arc(-9 * k, 0, 2.4 * k, 0, TAU); ctx.fill();         // marca no dorso
+    ctx.translate(s.x, s.y); ctx.rotate(s.ang); ctx.fillStyle = 'rgba(8,6,12,.9)'; ctx.lineWidth = 1.4;
+    ctx.beginPath(); ctx.ellipse(-9 * k, 0, 9 * k, 7 * k, 0, 0, TAU); ctx.fill(); ctx.stroke();
+    ctx.beginPath(); ctx.arc(5 * k, 0, 5.2 * k, 0, TAU); ctx.fill(); ctx.stroke();
+    ctx.fillStyle = col; ctx.beginPath(); ctx.arc(-9 * k, 0, 2.4 * k, 0, TAU); ctx.fill();
     ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(8 * k, -1.8 * k, 1.1 * k, 0, TAU); ctx.arc(8 * k, 1.8 * k, 1.1 * k, 0, TAU); ctx.fill();
     ctx.restore();
   }
-  function drawBursts(now) {
-    bursts = bursts.filter(b => now - b.t < 600);
+  function drawBursts(now, e) {
     for (const b of bursts) {
-      const p = (now - b.t) / 600;
-      ctx.strokeStyle = `hsla(${b.hue},95%,70%,${1 - p})`; ctx.lineWidth = 2;
-      ctx.beginPath(); ctx.arc(b.x, b.y, 10 + p * 70, 0, TAU); ctx.stroke();
+      const p = (now - b.t) / 600; ctx.strokeStyle = `hsla(${b.hue},95%,70%,${1 - p})`; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(b.x - e * .7 * IPD, b.y, 10 + p * 60, 0, TAU); ctx.stroke();
     }
+  }
+  function drawHud(e) {
+    ctx.save(); ctx.translate(-e * .6 * IPD, 0); ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.shadowColor = '#000'; ctx.shadowBlur = 8; ctx.fillStyle = '#f4efe6'; ctx.font = `italic ${Math.round(H * .05)}px ${FONT}`;
+    ctx.fillText(hudPath, we / 2, H * .88);
+    ctx.fillStyle = '#b9b2c6'; ctx.font = `${Math.round(H * .032)}px ${FONT}`; ctx.fillText(hudCount, we / 2, H * .94); ctx.restore();
+  }
+  function drawEye(e, now) {
+    ctx.save(); ctx.beginPath(); ctx.rect(e < 0 ? 0 : we, 0, we, H); ctx.clip(); ctx.translate(e < 0 ? 0 : we, 0);
+    cover(ctx, we, H); drawWords(now, e);
+    ctx.globalCompositeOperation = 'lighter';
+    for (const s of spiders) drawSpider(s, e);
+    ctx.globalCompositeOperation = 'source-over';
+    drawBursts(now, e); ctx.fillStyle = vig; ctx.fillRect(0, 0, we, H); drawHud(e); ctx.restore();
   }
 
   // ---------- Taxonomia ao vivo ----------
   function hud() {
-    const tally = {}, T = { luz: {}, cor: {}, tex: {}, mov: {} }; let n = 0;
-    for (const c of cells) {
-      if (!c.word) continue; n++;
-      tally[c.word] = (tally[c.word] || 0) + 1;
-      for (const k in T) { const w = c.parts[k]; if (w) T[k][w] = (T[k][w] || 0) + 1; }
-    }
+    const T = { luz: {}, cor: {}, tex: {}, mov: {} }; let n = 0;
+    for (const c of cells) { if (!c.word) continue; n++; for (const k in T) { const w = c.parts[k]; if (w) T[k][w] = (T[k][w] || 0) + 1; } }
     const top = o => Object.entries(o).sort((a, b) => b[1] - a[1]);
     if (n) {
-      const p = [top(T.luz)[0], top(T.cor)[0], top(T.tex)[0]].map(e => e ? e[0] : null).filter(Boolean);
-      const mv = top(T.mov)[0]; if (mv && mv[1] >= 3) p.push(mv[0]);
-      $('path').textContent = p.join(' › ');
-      $('top').textContent = top(tally).slice(0, 6).map(e => `${e[0]} ${e[1]}`).join('   ');
+      const p = [top(T.luz)[0], top(T.cor)[0], top(T.tex)[0]].map(e => e ? e[0] : null).filter(Boolean), mv = top(T.mov)[0];
+      if (mv && mv[1] >= 2) p.push(mv[0]); hudPath = p.join(' › ');
     }
-    $('count').textContent = `${spiders.filter(s => !s.dying).length} aranhas · ${n}/${cells.length} blocos lidos`;
+    hudCount = `${spiders.filter(s => !s.dying).length} aranhas · ${n}/${cells.length} blocos`;
   }
 
   // ---------- Loop ----------
   function loop(now) {
     requestAnimationFrame(loop);
     const dt = Math.min(.05, (now - last) / 1000 || .016); last = now;
-    if (video.readyState < 2) return;
-    cover(ctx, W, H);
-    if (now - lastAn > 60) { analyze(); lastAn = now; }
+    if (video.readyState < 2 || !cells.length) return;
+    if (now - lastAn > 70) { analyze(); lastAn = now; }
     for (const s of spiders) updateSpider(s, dt, now);
-    spiders = spiders.filter(s => s.alpha > 0);
+    spiders = spiders.filter(s => s.alpha > 0); bursts = bursts.filter(b => now - b.t < 600);
     if (spiders.filter(s => !s.dying).length < 3 && Math.random() < .1) spawnEdge();
-    drawWords(now);
-    ctx.globalCompositeOperation = 'lighter';
-    for (const s of spiders) drawSpider(s);
-    ctx.globalCompositeOperation = 'source-over';
-    drawBursts(now);
+    drawEye(-1, now); drawEye(1, now);
+    ctx.fillStyle = '#000'; ctx.fillRect(we - 1, 0, 2, H);
+    if (GL) present();
     if (now - lastHud > 250) { hud(); lastHud = now; }
   }
 })();
