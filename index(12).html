@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>Bactéria Virtual · classificador de blocos</title>
+<style>
+  :root { --bg:#05080a; --ink:#e8f1ee; --dim:#8aa09a; --cell:#16e0b4; --core:#ff2e63; }
+  html,body { margin:0; height:100%; background:var(--bg); color:var(--ink); overflow:hidden;
+    font-family:"JetBrains Mono","SF Mono",ui-monospace,Menlo,Consolas,monospace; }
+  canvas { position:fixed; inset:0; width:100%; height:100%; display:block; }
+  #hud { position:fixed; left:0; right:0; top:0; padding:calc(10px + env(safe-area-inset-top,0px)) 12px 0;
+    display:flex; justify-content:space-between; gap:12px; font-size:11px; pointer-events:none;
+    text-shadow:0 1px 3px #000, 0 0 6px #000; }
+  #legend div { display:flex; align-items:center; gap:6px; line-height:1.5; }
+  #legend i { width:9px; height:9px; border-radius:2px; display:inline-block; }
+  #log { position:fixed; left:12px; bottom:calc(12px + env(safe-area-inset-bottom,0px)); font-size:11px;
+    line-height:1.5; max-width:78%; pointer-events:none; text-shadow:0 1px 3px #000, 0 0 6px #000; }
+  #log div:last-child { color:var(--cell); }
+  #log div { opacity:.75; }
+  #start { position:fixed; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center;
+    gap:14px; background:var(--bg); text-align:center; padding:24px; z-index:5; }
+  #start h1 { margin:0; font-size:22px; font-weight:700; letter-spacing:.01em; }
+  #start p { margin:0; max-width:34ch; color:var(--dim); font-size:13px; line-height:1.6; }
+  button { font:inherit; font-size:14px; font-weight:700; color:var(--bg); background:var(--cell); border:0;
+    border-radius:999px; padding:12px 26px; cursor:pointer; }
+  button:focus-visible { outline:2px solid #fff; outline-offset:3px; }
+  #flip { position:fixed; right:12px; bottom:calc(12px + env(safe-area-inset-bottom,0px)); z-index:4;
+    padding:9px 16px; font-size:12px; background:rgba(5,8,10,.7); color:var(--ink); border:1px solid var(--dim); display:none; }
+  #err { color:var(--core); font-size:12px; min-height:1em; max-width:36ch; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hud"><div id="status">Procurando blocos…</div><div id="legend"></div></div>
+<div id="log"></div>
+<button id="flip" aria-label="Trocar câmera">Trocar câmera</button>
+<div id="start">
+  <h1>Bactéria virtual</h1>
+  <p>Ela caminha sobre o que a câmera enxerga, para em cada bloco e classifica pela cor, luz, textura e movimento.</p>
+  <button id="go">Ativar câmera</button>
+  <div id="err"></div>
+</div>
+<video id="v" playsinline muted autoplay style="display:none"></video>
+
+<script>
+(() => {
+  const $ = id => document.getElementById(id);
+  const cv = $('c'), ctx = cv.getContext('2d');
+  const video = $('v');
+  const small = document.createElement('canvas');
+  const sctx = small.getContext('2d', { willReadFrequently: true });
+
+  // ---------- Classes (ordem = prioridade de decisão) ----------
+  const CLASSES = {
+    MOVIMENTO: '#ff9f1c', SOMBRA: '#7a6cff', LUZ: '#fff27a', VEGETACAO: '#4ade80',
+    CEU_AGUA: '#38bdf8', PELE_QUENTE: '#ff6b6b', TEXTO_BORDA: '#ffffff', TEXTURA: '#c084fc',
+    SUPERFICIE: '#94a3b8', OBJETO: '#16e0b4'
+  };
+  const NOMES = {
+    MOVIMENTO:'movimento', SOMBRA:'sombra', LUZ:'luz', VEGETACAO:'vegetação', CEU_AGUA:'céu / água',
+    PELE_QUENTE:'tom quente', TEXTO_BORDA:'texto / borda', TEXTURA:'textura', SUPERFICIE:'superfície lisa', OBJETO:'objeto'
+  };
+  $('legend').innerHTML = Object.keys(CLASSES).map(k =>
+    `<div><i style="background:${CLASSES[k]}"></i><span data-k="${k}">${NOMES[k]} 0</span></div>`).join('');
+
+  // ---------- Estado ----------
+  let W = 0, H = 0, dpr = 1, cols = 0, rows = 0, cw = 0, ch = 0;
+  let cells = [], prevLum = null, facing = 'environment', stream = null;
+  const bact = { x:0, y:0, vx:0, vy:0, ang:0, target:null, state:'move', scanT:0, cur:0 };
+  const logLines = [];
+  const SCAN_MS = 650, CELL_PX = 88, PS = 8; // PS = pixels amostrados por bloco
+
+  function layout() {
+    dpr = Math.min(window.devicePixelRatio || 1, 2);
+    W = innerWidth; H = innerHeight;
+    cv.width = W * dpr; cv.height = H * dpr;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    cols = Math.max(4, Math.round(W / CELL_PX)); rows = Math.max(4, Math.round(H / CELL_PX));
+    cw = W / cols; ch = H / rows;
+    small.width = cols * PS; small.height = rows * PS;
+    cells = Array.from({ length: cols * rows }, () => ({ label:null, t:0, live:null, last:0 }));
+    prevLum = null;
+    bact.x = W / 2; bact.y = H / 2; bact.target = null; bact.state = 'move';
+    bact.cur = Math.floor(rows / 2) * cols + Math.floor(cols / 2);
+  }
+
+  // ---------- Câmera ----------
+  async function startCam() {
+    if (stream) stream.getTracks().forEach(t => t.stop());
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: { ideal: facing }, width: { ideal: 1280 } }, audio: false });
+      video.srcObject = stream; await video.play();
+      $('start').style.display = 'none'; $('flip').style.display = 'block';
+      layout(); if (!running) { running = true; requestAnimationFrame(loop); }
+    } catch (e) {
+      $('err').textContent = 'Não foi possível abrir a câmera: ' + e.message +
+        '. Use HTTPS ou localhost e permita o acesso.';
+    }
+  }
+  $('go').onclick = startCam;
+  $('flip').onclick = () => { facing = facing === 'environment' ? 'user' : 'environment'; startCam(); };
+  addEventListener('resize', () => { if (stream) layout(); });
+
+  // ---------- Desenha o vídeo em "cover" ----------
+  function cover(target, tw, th) {
+    const vw = video.videoWidth, vh = video.videoHeight;
+    const s = Math.max(tw / vw, th / vh), sw = tw / s, sh = th / s;
+    target.drawImage(video, (vw - sw) / 2, (vh - sh) / 2, sw, sh, 0, 0, tw, th);
+  }
+
+  // ---------- Análise: estatísticas reais de cada bloco ----------
+  function analyze() {
+    cover(sctx, small.width, small.height);
+    const sw = small.width, d = sctx.getImageData(0, 0, sw, small.height).data;
+    const lum = new Float32Array(sw * small.height);
+    for (let i = 0, p = 0; i < lum.length; i++, p += 4) lum[i] = 0.299*d[p] + 0.587*d[p+1] + 0.114*d[p+2];
+
+    for (let cy = 0; cy < rows; cy++) for (let cx = 0; cx < cols; cx++) {
+      let r=0, g=0, b=0, edge=0, motion=0, n=0;
+      for (let y = 0; y < PS; y++) for (let x = 0; x < PS; x++) {
+        const px = cx*PS + x, py = cy*PS + y, i = py*sw + px, p = i*4;
+        r += d[p]; g += d[p+1]; b += d[p+2];
+        if (px+1 < sw) edge += Math.abs(lum[i] - lum[i+1]);
+        if (py+1 < small.height) edge += Math.abs(lum[i] - lum[i+sw]);
+        if (prevLum) motion += Math.abs(lum[i] - prevLum[i]);
+        n++;
+      }
+      r/=n; g/=n; b/=n; edge/=n*2; motion/=n;
+      const mx = Math.max(r,g,b), mn = Math.min(r,g,b);
+      const sat = mx ? (mx - mn) / mx : 0;
+      let hue = 0;
+      if (mx !== mn) {
+        const dl = mx - mn;
+        hue = mx === r ? ((g-b)/dl) % 6 : mx === g ? (b-r)/dl + 2 : (r-g)/dl + 4;
+        hue = (hue * 60 + 360) % 360;
+      }
+      const cell = cells[cy*cols + cx], old = cell.live;
+      cell.live = { r, g, b, bri: 0.299*r + 0.587*g + 0.114*b, sat, hue, edge,
+                    motion: old ? old.motion*0.6 + motion*0.4 : motion };
+    }
+    prevLum = lum;
+  }
+
+  function classify(s) {
+    if (s.motion > 20) return 'MOVIMENTO';
+    if (s.bri < 38) return 'SOMBRA';
+    if (s.bri > 215 && s.sat < 0.25) return 'LUZ';
+    if (s.edge > 26) return 'TEXTO_BORDA';
+    if (s.sat > 0.22) {
+      if (s.hue >= 70 && s.hue < 170) return 'VEGETACAO';
+      if (s.hue >= 180 && s.hue < 260) return 'CEU_AGUA';
+      if (s.hue < 45 || s.hue >= 335) return 'PELE_QUENTE';
+    }
+    if (s.edge > 11) return 'TEXTURA';
+    if (s.sat < 0.18) return 'SUPERFICIE';
+    return 'OBJETO';
+  }
+
+  // ---------- Decisão: para onde a bactéria vai ----------
+  function pickTarget(now) {
+    const cx = bact.cur % cols, cy = Math.floor(bact.cur / cols);
+    let best = -1, bestScore = -1e9;
+    for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) {
+      if (!dx && !dy) continue;
+      const x = cx + dx, y = cy + dy;
+      if (x < 0 || y < 0 || x >= cols || y >= rows) continue;
+      const c = cells[y*cols + x];
+      const age = c.last ? (now - c.last) / 1000 : 60;          // blocos nunca vistos valem mais
+      const mot = c.live ? c.live.motion : 0;                   // movimento chama atenção
+      const score = age + mot * 1.5 - Math.hypot(dx, dy) * 3 + Math.random() * 8;
+      if (score > bestScore) { bestScore = score; best = y*cols + x; }
+    }
+    bact.target = best;
+  }
+
+  function cellCenter(i) { return [ (i % cols + .5) * cw, (Math.floor(i / cols) + .5) * ch ]; }
+
+  function pushLog(i, cls, s) {
+    const l = Math.floor(i / cols), c = i % cols;
+    logLines.push(`> [${l},${c}] ${NOMES[cls]} · luz ${s.bri|0} · borda ${s.edge|0}`);
+    if (logLines.length > 5) logLines.shift();
+    $('log').innerHTML = logLines.map(t => `<div>${t}</div>`).join('');
+  }
+
+  function updateLegend() {
+    const cnt = {}; cells.forEach(c => { if (c.label) cnt[c.label] = (cnt[c.label]||0) + 1; });
+    document.querySelectorAll('#legend span').forEach(el => {
+      const k = el.dataset.k; el.textContent = NOMES[k] + ' ' + (cnt[k] || 0);
+    });
+    const done = cells.filter(c => c.label).length;
+    $('status').textContent = `Blocos classificados: ${done}/${cells.length}`;
+  }
+
+  // ---------- Movimento da bactéria ----------
+  function step(dt, now) {
+    if (bact.state === 'move') {
+      if (bact.target == null) pickTarget(now);
+      const [tx, ty] = cellCenter(bact.target);
+      const dx = tx - bact.x, dy = ty - bact.y, dist = Math.hypot(dx, dy) || 1;
+      const sp = 150;
+      bact.vx += ((dx/dist)*sp - bact.vx) * Math.min(1, dt*4);
+      bact.vy += ((dy/dist)*sp - bact.vy) * Math.min(1, dt*4);
+      bact.x += bact.vx*dt + Math.sin(now/180) * 0.5;
+      bact.y += bact.vy*dt + Math.cos(now/210) * 0.5;
+      bact.ang = Math.atan2(bact.vy, bact.vx);
+      if (dist < 10) { bact.cur = bact.target; bact.state = 'scan'; bact.scanT = now; }
+    } else if (now - bact.scanT > SCAN_MS) {
+      const c = cells[bact.cur];
+      if (c.live) {
+        c.label = classify(c.live); c.t = now; c.last = now;
+        pushLog(bact.cur, c.label, c.live); updateLegend();
+      }
+      bact.target = null; bact.state = 'move';
+    } else { bact.vx *= .9; bact.vy *= .9; }
+  }
+
+  // ---------- Desenho ----------
+  function drawCells(now) {
+    ctx.font = '600 10px ui-monospace, Menlo, monospace'; ctx.textBaseline = 'top';
+    for (let i = 0; i < cells.length; i++) {
+      const c = cells[i]; if (!c.label) continue;
+      const x = (i % cols) * cw, y = Math.floor(i / cols) * ch;
+      const a = Math.max(.3, 1 - (now - c.t) / 25000), col = CLASSES[c.label];
+      ctx.globalAlpha = a * .16; ctx.fillStyle = col; ctx.fillRect(x, y, cw, ch);
+      ctx.globalAlpha = a; ctx.strokeStyle = col; ctx.lineWidth = 1; ctx.strokeRect(x+.5, y+.5, cw-1, ch-1);
+      ctx.fillStyle = col; ctx.fillText(NOMES[c.label], x + 4, y + 4);
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  function drawBacteria(now) {
+    const t = now / 1000, { x, y, ang } = bact;
+    ctx.save(); ctx.translate(x, y);
+
+    if (bact.state === 'scan') {                     // anel de varredura + bloco em foco
+      const p = (now - bact.scanT) / SCAN_MS;
+      ctx.strokeStyle = '#16e0b4'; ctx.lineWidth = 2; ctx.globalAlpha = 1 - p;
+      ctx.beginPath(); ctx.arc(0, 0, 20 + p * Math.max(cw, ch) * .7, 0, 7); ctx.stroke();
+      ctx.globalAlpha = 1;
+      ctx.strokeStyle = '#16e0b4'; ctx.lineWidth = 2; ctx.setLineDash([6, 4]);
+      ctx.strokeRect(-cw/2, -ch/2, cw, ch); ctx.setLineDash([]);
+    }
+
+    ctx.rotate(ang);
+    ctx.lineCap = 'round'; ctx.strokeStyle = 'rgba(255,255,255,.85)'; ctx.lineWidth = 1.5;
+    for (let k = -1; k <= 1; k++) {                  // flagelos
+      ctx.beginPath(); ctx.moveTo(-20, k * 6);
+      for (let s = 1; s <= 12; s++)
+        ctx.lineTo(-20 - s * 5, k * 6 + Math.sin(t * 9 - s * .7 + k) * (2 + s * .8));
+      ctx.stroke();
+    }
+    ctx.beginPath();                                  // membrana ondulante
+    for (let a = 0; a <= 6.4; a += .2) {
+      const r = 22 + Math.sin(a * 3 + t * 4) * 2.2 + Math.cos(a * 2 - t * 3) * 1.5;
+      const px = Math.cos(a) * r * 1.25, py = Math.sin(a) * r * .85;
+      a ? ctx.lineTo(px, py) : ctx.moveTo(px, py);
+    }
+    ctx.closePath(); ctx.fillStyle = 'rgba(255,46,99,.18)'; ctx.fill(); ctx.stroke();
+
+    ctx.beginPath(); ctx.arc(2, 0, 7 + Math.sin(t * 6) * 1.2, 0, 7);   // núcleo
+    ctx.fillStyle = '#ff2e63'; ctx.fill();
+
+    for (let i = 0; i < 6; i++) {                     // sensores
+      const a = t * .8 + i * 1.047, px = Math.cos(a) * 36, py = Math.sin(a) * 30;
+      ctx.strokeStyle = 'rgba(22,224,180,.6)'; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(px, py); ctx.stroke();
+      ctx.beginPath(); ctx.arc(px, py, 2.6, 0, 7); ctx.fillStyle = '#16e0b4'; ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  // ---------- Loop ----------
+  let running = false, last = 0, lastAnalyze = 0;
+  function loop(now) {
+    requestAnimationFrame(loop);
+    const dt = Math.min(.05, (now - last) / 1000 || .016); last = now;
+    if (video.readyState < 2) return;
+    cover(ctx, W, H);
+    if (now - lastAnalyze > 100) { analyze(); lastAnalyze = now; }
+    step(dt, now); drawCells(now); drawBacteria(now);
+  }
+})();
+</script>
+</body>
+</html>
